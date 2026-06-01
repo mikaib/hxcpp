@@ -29,6 +29,10 @@ namespace hx
 {
    int gByteMarkID = 0x10;
    int gRememberedByteMarkID = 0x10 | HX_GC_REMEMBERED;
+bool gWriteBarrierEnabled = true;
+bool gWriteBarrierStatsEnabled = false;
+bool gGcTimingEnabled = false;
+double gGcPauseTargetMs = 0.0;
 
 
 int gFastPath = 0;
@@ -39,6 +43,13 @@ int gSlowPath = 0;
 
 using hx::gByteMarkID;
 using hx::gRememberedByteMarkID;
+using hx::gWriteBarrierEnabled;
+using hx::gWriteBarrierStatsEnabled;
+using hx::gGcTimingEnabled;
+using hx::gGcPauseTargetMs;
+
+static volatile int sgWriteBarrierWrites = 0;
+static volatile int sgWriteBarrierRemembered = 0;
 
 
 namespace hx
@@ -88,6 +99,18 @@ void DebuggerTrap()
       *(int *)0=0;
       #endif
    }
+}
+}
+
+namespace hx
+{
+void GCWriteBarrierStats(bool inRemembered)
+{
+   if (!gWriteBarrierStatsEnabled)
+      return;
+   _hx_atomic_add(&sgWriteBarrierWrites, 1);
+   if (inRemembered)
+      _hx_atomic_add(&sgWriteBarrierRemembered, 1);
 }
 }
 
@@ -224,7 +247,12 @@ static volatile int sThreadZeroMisses = 0;
 #endif
 
 enum { MARK_BYTE_MASK = 0x0f };
-enum { FULL_MARK_BYTE_MASK = 0x3f };
+enum { FULL_MARK_BYTE_MASK = HX_GC_MARK_BYTE_MASK };
+
+inline bool IsMarkCurrent(unsigned char mark)
+{
+   return (mark & HX_GC_MARK_BYTE_MASK) == ::hx::gByteMarkID;
+}
 
 
 enum
@@ -1150,7 +1178,7 @@ struct BlockDataInfo
       if ( ((time+1) & MARK_BYTE_MASK) != (gByteMarkID & MARK_BYTE_MASK)  )
       {
          // Object is either out-of-date, or already marked....
-         return time==gByteMarkID ? allocMarked : allocNone;
+         return IsMarkCurrent(time) ? allocMarked : allocNone;
       }
 
       if (!allowPrevious)
@@ -2507,7 +2535,7 @@ void FindZombies(MarkContext &inContext)
       ++next;
 
       unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          sZombieList.push(obj);
          sMakeZombieSet.erase(i);
@@ -2527,7 +2555,7 @@ bool IsWeakRefValid(const HX_CHAR *inPtr)
    unsigned char mark = ((unsigned char *)inPtr)[HX_ENDIAN_MARK_ID_BYTE];
 
     // Special case of member closure - check if the 'this' pointer is still alive
-   return  mark==gByteMarkID;
+   return IsMarkCurrent(mark);
 }
 
 bool IsWeakRefValid(hx::Object *inPtr)
@@ -2535,14 +2563,14 @@ bool IsWeakRefValid(hx::Object *inPtr)
    unsigned char mark = ((unsigned char *)inPtr)[HX_ENDIAN_MARK_ID_BYTE];
 
     // Special case of member closure - check if the 'this' pointer is still alive
-    bool isCurrent = mark==gByteMarkID;
+    bool isCurrent = IsMarkCurrent(mark);
     if ( !isCurrent && inPtr->__GetType()==vtFunction)
     {
         hx::Object *thiz = (hx::Object *)inPtr->__GetHandle();
         if (thiz)
         {
             mark = ((unsigned char *)thiz)[HX_ENDIAN_MARK_ID_BYTE];
-            if (mark==gByteMarkID)
+            if (IsMarkCurrent(mark))
             {
                // The object is still alive, so mark the closure and continue
                MarkAlloc(inPtr,0);
@@ -2625,7 +2653,7 @@ void RunFinalizers()
          list.qerase(idx);
          delete f;
       }
-      else if (((unsigned char *)(f->mObject))[HX_ENDIAN_MARK_ID_BYTE] != gByteMarkID)
+      else if (!IsMarkCurrent(((unsigned char *)(f->mObject))[HX_ENDIAN_MARK_ID_BYTE]))
       {
          if (f->mFinalizer)
          {
@@ -2646,7 +2674,7 @@ void RunFinalizers()
    {
       Finalizable &f = sFinalizableList[idx];
       unsigned char mark = ((unsigned char *)f.base)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          finalizerCount++;
          f.run();
@@ -2663,7 +2691,7 @@ void RunFinalizers()
       ++next;
 
       unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          finalizerCount++;
          (*i->second)(obj);
@@ -2681,7 +2709,7 @@ void RunFinalizers()
       ++next;
 
       unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          finalizerCount++;
          (*i->second)(obj);
@@ -2700,7 +2728,7 @@ void RunFinalizers()
 
       hx::Object *o = i->first;
       unsigned char mark = ((unsigned char *)o)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID && !(((unsigned int *)o)[-1] & HX_GC_CONST_ALLOC_BIT))
+      if ( !IsMarkCurrent(mark) && !(((unsigned int *)o)[-1] & HX_GC_CONST_ALLOC_BIT))
       {
          sFreeObjectIds.push(i->second);
          sIdObjectMap[i->second] = 0;
@@ -2715,7 +2743,7 @@ void RunFinalizers()
       HashRoot *ref = sWeakHashList[i];
       unsigned char mark = ((unsigned char *)ref)[HX_ENDIAN_MARK_ID_BYTE];
       // Object itself is gone - no need to worry about that again
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          sWeakHashList.qerase(i);
          // no i++ ...
@@ -2734,7 +2762,7 @@ void RunFinalizers()
       WeakRef *ref = sWeakRefs[i];
       unsigned char mark = ((unsigned char *)ref)[HX_ENDIAN_MARK_ID_BYTE];
       // Object itself is gone ...
-      if ( mark!=gByteMarkID )
+      if ( !IsMarkCurrent(mark) )
       {
          sWeakRefs.qerase(i);
          // no i++ ...
@@ -2746,13 +2774,13 @@ void RunFinalizers()
          unsigned char mark = ((unsigned char *)r)[HX_ENDIAN_MARK_ID_BYTE];
 
          // Special case of member closure - check if the 'this' pointer is still alive
-         if ( mark!=gByteMarkID && r->__GetType()==vtFunction)
+         if ( !IsMarkCurrent(mark) && r->__GetType()==vtFunction)
          {
             hx::Object *thiz = (hx::Object *)r->__GetHandle();
             if (thiz)
             {
                mark = ((unsigned char *)thiz)[HX_ENDIAN_MARK_ID_BYTE];
-               if (mark==gByteMarkID)
+               if (IsMarkCurrent(mark))
                {
                   // The object is still alive, so mark the closure and continue
                   MarkAlloc(r,0);
@@ -2760,7 +2788,7 @@ void RunFinalizers()
             }
          }
 
-         if ( mark!=gByteMarkID )
+         if ( !IsMarkCurrent(mark) )
          {
             ref->mRef.mPtr = 0;
             sWeakRefs.qerase(i);
@@ -4783,7 +4811,7 @@ public:
       for(void **watch = hxWatchList; *watch; watch++)
       {
          GCLOG("********* Watch mark : %p %08x\n",*watch, ((unsigned int *)*watch)[-1]);
-         GCLOG(" ******** is marked  : %d\n", (((unsigned char *)(*watch))[HX_ENDIAN_MARK_ID_BYTE]== gByteMarkID));
+         GCLOG(" ******** is marked  : %d\n", IsMarkCurrent(((unsigned char *)(*watch))[HX_ENDIAN_MARK_ID_BYTE]));
       }
       #endif
    }
@@ -5676,7 +5704,7 @@ void MarkConservative(int *inBottom, int *inTop,hx::MarkContext *__inCtx)
             if (mem==memLarge)
             {
                unsigned char &mark = ((unsigned char *)(vptr))[HX_ENDIAN_MARK_ID_BYTE];
-               if (mark!=gByteMarkID)
+               if (!IsMarkCurrent(mark))
                   mark = gByteMarkID;
             }
             else
@@ -7094,4 +7122,3 @@ unsigned int __hxcpp_obj_hash(Dynamic inObj)
 
 
 void DummyFunction(void *inPtr) { }
-

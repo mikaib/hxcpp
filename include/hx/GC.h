@@ -156,6 +156,13 @@ void  GCSetFinalizer( hx::Object *, hx::finalizer f );
 //  0xffffffff = pause requested
 extern int gPauseForCollect;
 
+// Write barrier and GC pacing/timing controls
+HXCPP_EXTERN_CLASS_ATTRIBUTES extern bool gWriteBarrierEnabled;
+HXCPP_EXTERN_CLASS_ATTRIBUTES extern bool gWriteBarrierStatsEnabled;
+HXCPP_EXTERN_CLASS_ATTRIBUTES extern bool gGcTimingEnabled;
+HXCPP_EXTERN_CLASS_ATTRIBUTES extern double gGcPauseTargetMs;
+HXCPP_EXTERN_CLASS_ATTRIBUTES void GCWriteBarrierStats(bool inRemembered);
+
 
 // Minimum total memory - used + buffer for new objects
 extern int sgMinimumWorkingMemory;
@@ -295,6 +302,7 @@ namespace hx
 #define IMMIX_LINE_LEN     (1<<IMMIX_LINE_BITS)
 
 #define HX_GC_REMEMBERED          0x40
+#define HX_GC_MARK_BYTE_MASK      0x3f
 
 // The size info is stored in the header 8 bits to the right
 #define IMMIX_ALLOC_SIZE_SHIFT  6
@@ -454,28 +462,47 @@ typedef ImmixAllocator GcAllocator;
 typedef ImmixAllocator Ctx;
 
 
-#ifdef HXCPP_GC_GENERATIONAL
-  #define HX_OBJ_WB_CTX(obj,value,ctx) { \
-        unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
-        if (mark == ::hx::gByteMarkID && value && !((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE  ] ) { \
+#define HX_OBJ_WB_CTX(obj,value,ctx) { \
+   if (::hx::gWriteBarrierEnabled) { \
+      ::hx::StackContext *hx_ctx = (ctx); \
+      if (hx_ctx) { \
+         bool hx_remembered = false; \
+         if (value) { \
+            unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
+            if ( (mark & HX_GC_MARK_BYTE_MASK) == ::hx::gByteMarkID ) { \
+               unsigned char valueMark = ((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE  ]; \
+               if ( (valueMark & HX_GC_MARK_BYTE_MASK) != ::hx::gByteMarkID ) { \
+                  mark|=HX_GC_REMEMBERED; \
+                  hx_ctx->pushReferrer(obj); \
+                  hx_remembered = true; \
+               } \
+            } \
+         } \
+         if (::hx::gWriteBarrierStatsEnabled) ::hx::GCWriteBarrierStats(hx_remembered); \
+      } \
+   } \
+}
+#define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx) { \
+   if (::hx::gWriteBarrierEnabled) { \
+      ::hx::StackContext *hx_ctx = (ctx); \
+      if (hx_ctx) { \
+         bool hx_remembered = false; \
+         unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
+         if ( (mark & HX_GC_MARK_BYTE_MASK) == ::hx::gByteMarkID )  { \
             mark|=HX_GC_REMEMBERED; \
-            ctx->pushReferrer(obj); \
-     } }
-  #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx) { \
-     unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
-     if (mark == ::hx::gByteMarkID)  { \
-        mark|=HX_GC_REMEMBERED; \
-        ctx->pushReferrer(obj); \
-     } }
-  // I'm not sure if this will ever trigger...
-  #define HX_OBJ_WB_NEW_MARKED_OBJECT(obj) { \
-     if (((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]==::hx::gByteMarkID) ::hx::NewMarkedObject(obj); \
-  }
-#else
-  #define HX_OBJ_WB_CTX(obj,value,ctx)
-  #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx)
-  #define HX_OBJ_WB_NEW_MARKED_OBJECT(obj)
-#endif
+            hx_ctx->pushReferrer(obj); \
+            hx_remembered = true; \
+         } \
+         if (::hx::gWriteBarrierStatsEnabled) ::hx::GCWriteBarrierStats(hx_remembered); \
+      } \
+   } \
+}
+// I'm not sure if this will ever trigger...
+#define HX_OBJ_WB_NEW_MARKED_OBJECT(obj) { \
+   if (::hx::gWriteBarrierEnabled) { \
+      if ((((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE] & HX_GC_MARK_BYTE_MASK)==::hx::gByteMarkID) ::hx::NewMarkedObject(obj); \
+   } \
+}
 
 #define HX_OBJ_WB(obj,value) HX_OBJ_WB_CTX(obj,value,_hx_ctx)
 #define HX_ARRAY_WB(array,index,value) HX_OBJ_WB(array,value)
@@ -591,4 +618,3 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
 
 
 #endif
-

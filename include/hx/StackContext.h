@@ -431,11 +431,10 @@ struct StackContext : public hx::ImmixAllocator
    WeakStringSet *stringSet;
    #endif
 
-   #ifdef HXCPP_GC_GENERATIONAL
+   // Remembered set for write barrier tracking.
    MarkChunk *mOldReferrers;
    inline void pushReferrer(hx::Object *inObj)
    {
-      // If collector is running on non-generational mode, mOldReferrers will be null
       if (mOldReferrers)
       {
          mOldReferrers->push(inObj);
@@ -443,7 +442,6 @@ struct StackContext : public hx::ImmixAllocator
             mOldReferrers = mOldReferrers->swapForNew();
       }
    }
-   #endif
 
    #ifdef HXCPP_CATCH_SEGV
       #ifdef _MSC_VER

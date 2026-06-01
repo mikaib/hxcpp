@@ -69,6 +69,29 @@ void CommonInitAlloc()
       if (percent>0)
          sgTargetFreeSpacePercentage = percent;
    }
+
+   const char *writeBarrier = getenv("HXCPP_GC_ALWAYS_BARRIER");
+   if (writeBarrier)
+      gWriteBarrierEnabled = atoi(writeBarrier) != 0;
+
+   const char *barrierStats = getenv("HXCPP_GC_BARRIER_STATS");
+   if (barrierStats)
+      gWriteBarrierStatsEnabled = atoi(barrierStats) != 0;
+
+   const char *gcTiming = getenv("HXCPP_GC_TIMING");
+   if (gcTiming)
+      gGcTimingEnabled = atoi(gcTiming) != 0;
+
+   const char *pauseTarget = getenv("HXCPP_GC_PAUSE_TARGET_MS");
+   if (pauseTarget)
+   {
+      double targetMs = atof(pauseTarget);
+      if (targetMs > 0)
+      {
+         gGcPauseTargetMs = targetMs;
+         gGcTimingEnabled = true;
+      }
+   }
    #endif
 }
 
@@ -179,4 +202,3 @@ bool __hxcpp_is_const_string(const ::String &inString)
    #endif
    return ((unsigned int *)inString.raw_ptr())[-1] & HX_GC_CONST_ALLOC_BIT;
 }
-
